@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""納入実績の取得・集計（SQL で期間・顧客・品番を絞り込み、起動時全件ロードはしない）。"""
+"""納入実績の取得・集計（PostgreSQL から必要範囲のみ取得する）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from app.db import access_connector
+from app.db import postgres_connector
 
 
 class AggregateMode(str, Enum):
@@ -24,133 +24,150 @@ class AggregateMode(str, Enum):
 LIST_COLUMNS = ["顧客", "品番", "年", "月", "納品数", "金額"]
 
 
-def _delivery_from_join_sql(inner_join: bool) -> str:
-    """納入明細 SELECT … FROM … JOIN まで（WHERE は呼び出し側で付与）。"""
-    # Access のテキスト型は末尾スペース付きで格納されがち。JOIN・比較は Trim で揃える。
-    # 結合は t_納品.品番 ↔ t_製品マスタ.製品番号（製品名は説明列でコードと一致しない）。
-    # 顧客で絞るときは m 必須のため INNER JOIN にし、全件走査・結合の負荷を抑える。
-    join_kw = "INNER JOIN" if inner_join else "LEFT JOIN"
-    return f"""
-SELECT
-    d.[納入日] AS 納入日,
-    Trim(m.[客先名]) AS 顧客,
-    Trim(d.[品番]) AS 品番,
-    d.[納品数] AS 納品数,
-    d.[金額] AS 金額
-FROM
-    [t_納品] AS d
-{join_kw}
-    [t_製品マスタ] AS m
-    ON Trim(d.[品番]) = Trim(m.[製品番号])
-WHERE 1=1
-"""
+def _normalize_text(value: object) -> str:
+    return str(value or "").strip()
 
 
-def fetch_customer_names(conn) -> List[str]:
-    """顧客（t_製品マスタ.客先名）の一覧を DISTINCT で取得（件数は納品明細より軽量）。"""
-    # Nz は Access アプリ向けで ODBC 経由では未定義になることがあるため使わない。
-    # NULL は IS NOT NULL、空・空白のみは Len(Trim(...)) で除く（文字列リテラル比較を避ける）。
-    # DISTINCT 使用時、Access は ORDER BY に SELECT と同一の式が必要でエイリアス「顧客」は 22018 になる。
-    sql = """
-    SELECT DISTINCT Trim(m.[客先名]) AS 顧客
-    FROM [t_製品マスタ] AS m
-    WHERE m.[客先名] IS NOT NULL AND Len(Trim(m.[客先名])) > 0
-    ORDER BY Trim(m.[客先名])
-    """
-    rows = access_connector.fetch_all_dicts(conn, sql)
-    return [str(r["顧客"]).strip() for r in rows if r.get("顧客") is not None]
-
-
-def fetch_customer_code_name_pairs(conn) -> list[tuple[str, str]]:
-    """客先マスタから顧客コードと客先名の一覧を取得する。"""
+def _product_customer_map(conn) -> dict[str, str]:
     sql = """
     SELECT DISTINCT
-        Trim(k.[コード]) AS 顧客コード,
-        Trim(k.[客先]) AS 顧客名
-    FROM [t_客先マスタ] AS k
-    WHERE k.[コード] IS NOT NULL
-      AND k.[客先] IS NOT NULL
-      AND Len(Trim(k.[コード])) > 0
-      AND Len(Trim(k.[客先])) > 0
-    ORDER BY Trim(k.[コード]), Trim(k.[客先])
+        NULLIF(BTRIM(product_no), '') AS product_no,
+        NULLIF(BTRIM(customer_name), '') AS customer_name
+    FROM product_master
+    WHERE product_no IS NOT NULL
+      AND BTRIM(product_no) <> ''
     """
-    rows = access_connector.fetch_all_dicts(conn, sql)
-    return [
-        (str(row.get("顧客コード") or "").strip(), str(row.get("顧客名") or "").strip())
+    rows = postgres_connector.fetch_all_dicts(conn, sql)
+    return {
+        _normalize_text(row.get("product_no")): _normalize_text(row.get("customer_name"))
         for row in rows
-        if str(row.get("顧客コード") or "").strip()
-        and str(row.get("顧客名") or "").strip()
+        if _normalize_text(row.get("product_no"))
+    }
+
+
+def _product_numbers_for_customer(conn, customer: str) -> list[str]:
+    sql = """
+    SELECT DISTINCT NULLIF(BTRIM(product_no), '') AS product_no
+    FROM product_master
+    WHERE product_no IS NOT NULL
+      AND BTRIM(product_no) <> ''
+      AND BTRIM(customer_name) = %s
+    ORDER BY NULLIF(BTRIM(product_no), '')
+    """
+    rows = postgres_connector.fetch_all_dicts(conn, sql, [customer])
+    return [_normalize_text(row.get("product_no")) for row in rows if _normalize_text(row.get("product_no"))]
+
+
+def fetch_customer_names(conns: postgres_connector.PostgresConnections) -> List[str]:
+    """製品マスタに現れる顧客名の一覧を DISTINCT で取得する。"""
+    sql = """
+    SELECT DISTINCT NULLIF(BTRIM(customer_name), '') AS customer_name
+    FROM product_master
+    WHERE customer_name IS NOT NULL AND BTRIM(customer_name) <> ''
+    ORDER BY NULLIF(BTRIM(customer_name), '')
+    """
+    rows = postgres_connector.fetch_all_dicts(conns.masters, sql)
+    return [_normalize_text(row.get("customer_name")) for row in rows if _normalize_text(row.get("customer_name"))]
+
+
+def fetch_customer_code_name_pairs(conns: postgres_connector.PostgresConnections) -> list[tuple[str, str]]:
+    """客先マスタから顧客コードと客先名の一覧を取得する。"""
+    sql = """
+    SELECT
+        customer_code,
+        customer_name
+    FROM (
+        SELECT
+            NULLIF(BTRIM(code), '') AS customer_code,
+            NULLIF(BTRIM(customer), '') AS customer_name,
+            CASE WHEN BTRIM(code) ~ '^[0-9]+$' THEN BTRIM(code)::integer END AS customer_code_number
+        FROM customer_master
+        WHERE code IS NOT NULL
+          AND customer IS NOT NULL
+          AND BTRIM(code) <> ''
+          AND BTRIM(customer) <> ''
+    ) AS cleaned
+    GROUP BY customer_code, customer_name
+    ORDER BY
+        MIN(customer_code_number) NULLS LAST,
+        customer_code,
+        customer_name
+    """
+    rows = postgres_connector.fetch_all_dicts(conns.masters, sql)
+    return [
+        (_normalize_text(row.get("customer_code")), _normalize_text(row.get("customer_name")))
+        for row in rows
+        if _normalize_text(row.get("customer_code")) and _normalize_text(row.get("customer_name"))
     ]
 
 
-def fetch_distinct_hinban(conn) -> List[str]:
+def fetch_distinct_hinban(conns: postgres_connector.PostgresConnections) -> List[str]:
     """納品テーブルに現れる品番の一覧（候補プルダウン用・重複除去）。"""
     sql = """
-    SELECT DISTINCT Trim(d.[品番]) AS 品番
-    FROM [t_納品] AS d
-    WHERE d.[品番] IS NOT NULL AND Len(Trim(d.[品番])) > 0
+    SELECT DISTINCT NULLIF(BTRIM(product_no), '') AS product_no
+    FROM deliveries
+    WHERE product_no IS NOT NULL AND BTRIM(product_no) <> ''
+    ORDER BY NULLIF(BTRIM(product_no), '')
     """
-    rows = access_connector.fetch_all_dicts(conn, sql)
-    return sorted(
-        {str(r["品番"]).strip() for r in rows if r.get("品番") is not None}
-    )
+    rows = postgres_connector.fetch_all_dicts(conns.deliveries, sql)
+    return [_normalize_text(row.get("product_no")) for row in rows if _normalize_text(row.get("product_no"))]
 
 
-def fetch_distinct_hinban_for_customer(conn, customer: str) -> List[str]:
+def fetch_distinct_hinban_for_customer(conns: postgres_connector.PostgresConnections, customer: str) -> List[str]:
     """
     指定顧客に紐づく品番のみ（納品×製品マスタの結合は fetch_deliveries と同じ考え方）。
     顧客名は製品マスタの客先名と完全一致（Trim 済み文字列）で比較する。
     """
     cust = (customer or "").strip()
     if not cust or cust == "（すべて）":
-        return fetch_distinct_hinban(conn)
-    sql = """
-    SELECT DISTINCT Trim(d.[品番]) AS 品番
-    FROM [t_納品] AS d
-    INNER JOIN [t_製品マスタ] AS m
-        ON Trim(d.[品番]) = Trim(m.[製品番号])
-    WHERE d.[品番] IS NOT NULL AND Len(Trim(d.[品番])) > 0
-      AND Trim(m.[客先名]) = ?
-    """
-    rows = access_connector.fetch_all_dicts(conn, sql, [cust])
-    return sorted(
-        {str(r["品番"]).strip() for r in rows if r.get("品番") is not None}
-    )
+        return fetch_distinct_hinban(conns)
+    return _product_numbers_for_customer(conns.masters, cust)
 
 
 def fetch_deliveries(
-    conn,
+    conns: postgres_connector.PostgresConnections,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     customer: Optional[str] = None,
     product_code_filter: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    納入明細を取得。日付は省略時は DB 上の全納入日を対象。
-    期間指定時は開始・終了の両方を渡すこと。品番は部分一致（LIKE）。
-    """
+    """納入明細を取得。品番は部分一致（ILIKE）。"""
     if (date_from is None) ^ (date_to is None):
         raise ValueError("納入日の期間指定は開始日と終了日の両方が必要です。")
 
     cust = (customer or "").strip()
     has_customer = bool(cust and cust != "（すべて）")
-    sql = _delivery_from_join_sql(inner_join=has_customer)
     params: list = []
+    where = ["1=1"]
 
     if date_from is not None and date_to is not None:
-        sql += " AND d.[納入日] BETWEEN ? AND ?"
+        where.append("d.delivery_date::date BETWEEN %s AND %s")
         params.extend([date_from, date_to])
 
+    product_numbers: list[str] = []
     if has_customer:
-        sql += " AND Trim(m.[客先名]) = ?"
-        params.append(cust)
+        product_numbers = _product_numbers_for_customer(conns.masters, cust)
+        if not product_numbers:
+            return pd.DataFrame(columns=["納入日", "顧客", "品番", "納品数", "金額"])
+        where.append("BTRIM(d.product_no) = ANY(%s)")
+        params.append(product_numbers)
 
     prod = (product_code_filter or "").strip()
     if prod:
-        sql += " AND Trim(d.[品番]) LIKE ?"
+        where.append("BTRIM(d.product_no) ILIKE %s")
         params.append(f"%{prod}%")
 
-    rows = access_connector.fetch_all_dicts(conn, sql, params)
+    sql = f"""
+    SELECT
+        d.delivery_date AS 納入日,
+        NULLIF(BTRIM(d.product_no), '') AS 品番,
+        d.delivery_qty AS 納品数,
+        d.amount AS 金額
+    FROM deliveries AS d
+    WHERE {' AND '.join(where)}
+    ORDER BY d.delivery_date, NULLIF(BTRIM(d.product_no), '')
+    """
+    rows = postgres_connector.fetch_all_dicts(conns.deliveries, sql, params)
     if not rows:
         return pd.DataFrame(columns=["納入日", "顧客", "品番", "納品数", "金額"])
 
@@ -161,9 +178,10 @@ def fetch_deliveries(
     for col in ("納品数", "金額"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["顧客"] = df["顧客"].fillna("（未設定）").astype(str)
     df["品番"] = df["品番"].fillna("").astype(str)
-    return df
+    product_map = _product_customer_map(conns.masters)
+    df.insert(1, "顧客", df["品番"].map(product_map).fillna("（未設定）").astype(str))
+    return df[["納入日", "顧客", "品番", "納品数", "金額"]]
 
 
 def aggregate_for_list(df: pd.DataFrame, mode: AggregateMode) -> pd.DataFrame:
@@ -244,14 +262,14 @@ def monthly_totals_from_raw_deliveries(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def yearly_totals_for_customer(
-    conn,
+    conns: postgres_connector.PostgresConnections,
     customer: str,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     product_code_filter: Optional[str] = None,
 ) -> pd.DataFrame:
     """指定顧客の年次集計（予測・グラフ用）。列: 年, 納品数, 金額。日付省略時は全期間。"""
-    df = fetch_deliveries(conn, date_from, date_to, customer, product_code_filter)
+    df = fetch_deliveries(conns, date_from, date_to, customer, product_code_filter)
     y = yearly_totals_from_raw_deliveries(df)
     if y.empty:
         return pd.DataFrame(columns=["年", "納品数", "金額", "種別"])

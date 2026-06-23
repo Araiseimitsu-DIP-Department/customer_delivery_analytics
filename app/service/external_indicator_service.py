@@ -6,7 +6,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
+from html.parser import HTMLParser
 from typing import Optional
+from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -18,7 +20,9 @@ IIP_CODE = "IIP"
 CI_CODE = "CI"
 
 IIP_SOURCE_URL = "https://www.meti.go.jp/statistics/tyo/iip/xls/b2020_gsm1j.xlsx"
-CI_SOURCE_URL = "https://www.esri.cao.go.jp/jp/stat/di/0407ci.xlsx"
+CI_PAGE_URL = "https://www.esri.cao.go.jp/jp/stat/di/di.html"
+CI_SOURCE_URL = "https://www.esri.cao.go.jp/jp/stat/di/0605ci.xlsx"
+DOWNLOAD_TIMEOUT_SECONDS = 20
 
 
 @dataclass
@@ -31,6 +35,19 @@ class IndicatorStatus:
 
 class ExternalIndicatorFetchError(Exception):
     """外部指標の取得失敗。"""
+
+
+class _ExcelLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        for name, value in attrs:
+            if name.lower() == "href" and value:
+                self.hrefs.append(value)
 
 
 class ExternalIndicatorService:
@@ -163,8 +180,30 @@ class ExternalIndicatorService:
     @staticmethod
     def _download_excel(url: str) -> bytes:
         req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=60) as response:  # noqa: S310
+        with urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:  # noqa: S310
             return response.read()
+
+    @staticmethod
+    def _download_text(url: str) -> str:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:  # noqa: S310
+            return response.read().decode("utf-8", errors="replace")
+
+    def _resolve_latest_ci_url(self) -> str:
+        try:
+            html = self._download_text(CI_PAGE_URL)
+            parser = _ExcelLinkParser()
+            parser.feed(html)
+            candidates = [
+                urljoin(CI_PAGE_URL, href)
+                for href in parser.hrefs
+                if href.lower().endswith("ci.xlsx")
+            ]
+            if candidates:
+                return sorted(candidates)[-1]
+        except Exception:
+            pass
+        return CI_SOURCE_URL
 
     def _fetch_iip(self) -> pd.DataFrame:
         content = self._download_excel(IIP_SOURCE_URL)
@@ -189,7 +228,7 @@ class ExternalIndicatorService:
         return rows
 
     def _fetch_ci(self) -> pd.DataFrame:
-        content = self._download_excel(CI_SOURCE_URL)
+        content = self._download_excel(self._resolve_latest_ci_url())
         frame = pd.read_excel(BytesIO(content), sheet_name="指数 Indexes", header=None)
         if frame.shape[0] < 7:
             raise ExternalIndicatorFetchError("CI の Excel 形式を解析できません。")

@@ -39,9 +39,9 @@ def _report_fatal_startup_error(exc: BaseException) -> None:
 
 def main() -> int:
     try:
-        from app.tk_app import main as tk_main
+        from app.webview_app import main as webview_main
 
-        return tk_main()
+        return webview_main()
     except Exception as exc:  # noqa: BLE001
         _report_fatal_startup_error(exc)
         return 1

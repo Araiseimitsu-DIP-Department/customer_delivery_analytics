@@ -60,21 +60,18 @@ def fit_standard_model(
 
 def fit_external_model(
     years: Sequence[float],
-    iip_values: Sequence[float],
-    ci_values: Sequence[float],
+    indicator_values: pd.DataFrame | np.ndarray,
     values: Sequence[float],
+    feature_names: Sequence[str],
     weights: Sequence[float] | None = None,
 ) -> ForecastModel:
-    x = np.column_stack(
-        [
-            np.asarray(years, dtype=float),
-            np.asarray(iip_values, dtype=float),
-            np.asarray(ci_values, dtype=float),
-        ]
-    )
+    indicators = np.asarray(indicator_values, dtype=float)
+    if indicators.ndim == 1:
+        indicators = indicators.reshape(-1, 1)
+    x = np.column_stack([np.asarray(years, dtype=float), indicators])
     y = np.asarray(values, dtype=float)
     w = _normalize_weights(len(y), weights)
-    return _fit_linear_model(x, y, w, feature_names=("year", "iip_avg", "ci_avg"))
+    return _fit_linear_model(x, y, w, feature_names=("year", *tuple(feature_names)))
 
 
 def predict(model: ForecastModel, features: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
@@ -177,36 +174,40 @@ def run_yearly_forecast_bundle(
     )
     future_indicator_df["macro_factor"] = _resolve_macro_factors(future_years, macro_factors)
 
+    external_source = ""
+    external_feature_cols = _available_external_feature_columns(indicator_yearly, future_indicator_df)
     external_history = actual.merge(
         indicator_yearly[["年", "iip_avg", "ci_avg"]].copy(),
         on="年",
         how="left",
-    ).dropna(subset=["iip_avg", "ci_avg"])
+    )
+    if external_feature_cols:
+        external_history = external_history.dropna(subset=external_feature_cols)
 
-    if len(external_history.index) >= 3:
+    if external_feature_cols and len(external_history.index) >= 3:
         external_weights = generate_weights(len(external_history.index))
         external_qty_model = fit_external_model(
             external_history["年"],
-            external_history["iip_avg"],
-            external_history["ci_avg"],
+            external_history[external_feature_cols],
             external_history["納品数"],
+            external_feature_cols,
             external_weights,
         )
         external_amt_model = fit_external_model(
             external_history["年"],
-            external_history["iip_avg"],
-            external_history["ci_avg"],
+            external_history[external_feature_cols],
             external_history["金額"],
+            external_feature_cols,
             external_weights,
         )
-        external_features = future_indicator_df[["年", "iip_avg", "ci_avg"]].to_numpy(dtype=float)
+        external_features = future_indicator_df[["年", *external_feature_cols]].to_numpy(dtype=float)
         external_qty = np.maximum(predict(external_qty_model, external_features), 0.0)
         external_amt = np.maximum(predict(external_amt_model, external_features), 0.0)
-        external_source = "IIP・CIを含む多変量回帰"
+        external_source = _external_source_label(external_feature_cols)
     else:
         external_qty = weighted_qty.copy()
         external_amt = weighted_amt.copy()
-        external_source = "IIP・CI年次値が不足のため重み付き回帰を代用"
+        external_source = "外部指標不足のため重み付き回帰を代用"
 
     # 将来拡張: 高頻度 / 中頻度 / 低頻度のランク別係数をここへ乗せる。
     macro_factor_values = future_indicator_df["macro_factor"].to_numpy(dtype=float)
@@ -428,17 +429,16 @@ def _build_summary_lines(
 ) -> list[str]:
     start_year = int(actual["年"].min())
     end_year = int(actual["年"].max())
-    macro_text = "調整係数なし"
-    if macro_factors.size > 0 and not np.allclose(macro_factors, 1.0):
-        macro_text = f"調整係数 {macro_factors.min():.2f}〜{macro_factors.max():.2f}"
+    feature_cols = _available_external_feature_columns(external_history, future_indicator_df)
+    external_line = f"外部要因予測: {_external_source_label(feature_cols)}で算出"
+    if not feature_cols:
+        external_line = "外部要因予測: 外部指標が未取得のため参考値として表示"
 
     return [
-        f"直線延長: {start_year}〜{end_year}年を最小二乗で延長",
-        _build_weight_summary_line(actual),
-        f"外部要因予測: IIP=鉱工業生産指数 / CI=景気動向指数",
-        _build_indicator_reflection_line(external_history, future_indicator_df),
-        f"外部要因: {macro_text}",
-        _build_weight_detail_line(actual),
+        f"直線延長: {start_year}〜{end_year}年の実績傾向から算出",
+        "重み付き回帰: 直近年の実績を重視して算出",
+        external_line,
+        "注意: 予測は過去実績から見た目安です",
     ]
 
 
@@ -466,20 +466,28 @@ def _build_indicator_reflection_line(
     external_history: pd.DataFrame,
     future_indicator_df: pd.DataFrame,
 ) -> str:
-    history = external_history.dropna(subset=["iip_avg", "ci_avg"]).copy()
-    future = future_indicator_df.dropna(subset=["iip_avg", "ci_avg"]).copy()
+    feature_cols = _available_external_feature_columns(external_history, future_indicator_df)
+    if not feature_cols:
+        return "反映値: 外部指標の年次値不足"
+    history = external_history.dropna(subset=feature_cols).copy()
+    future = future_indicator_df.dropna(subset=feature_cols).copy()
     if history.empty or future.empty:
-        return "反映値: IIP / CI の年次値不足"
+        return "反映値: 外部指標の年次値不足"
 
     base_row = history.sort_values("年").iloc[-1]
     first_future = future.sort_values("年").iloc[0]
     last_future = future.sort_values("年").iloc[-1]
+    values = []
+    for col in feature_cols:
+        label = _external_feature_label(col)
+        values.append(
+            f"{label}={float(first_future[col]):.1f}→{float(last_future[col]):.1f}"
+        )
     return (
         "反映値: "
-        f"基準 {int(base_row['年'])}年 IIP={float(base_row['iip_avg']):.1f}, CI={float(base_row['ci_avg']):.1f} / "
+        f"基準 {int(base_row['年'])}年 / "
         f"将来 {int(first_future['年'])}年→{int(last_future['年'])}年 "
-        f"IIP={float(first_future['iip_avg']):.1f}→{float(last_future['iip_avg']):.1f}, "
-        f"CI={float(first_future['ci_avg']):.1f}→{float(last_future['ci_avg']):.1f}"
+        + ", ".join(values)
     )
 
 
@@ -487,15 +495,46 @@ def _build_graph_note(
     external_history: pd.DataFrame,
     future_indicator_df: pd.DataFrame,
 ) -> str:
-    history = external_history.dropna(subset=["iip_avg", "ci_avg"]).copy()
-    future = future_indicator_df.dropna(subset=["iip_avg", "ci_avg"]).copy()
+    feature_cols = _available_external_feature_columns(external_history, future_indicator_df)
+    if not feature_cols:
+        return "直線: 最小二乗 / 重み: 直近重視 / 外部: 指標値不足"
+    history = external_history.dropna(subset=feature_cols).copy()
+    future = future_indicator_df.dropna(subset=feature_cols).copy()
     if history.empty or future.empty:
-        return "直線: 最小二乗 / 重み: 直近重視 / 外部: IIP・CI値不足"
+        return "直線: 最小二乗 / 重み: 直近重視 / 外部: 指標値不足"
 
     first_future = future.sort_values("年").iloc[0]
     last_future = future.sort_values("年").iloc[-1]
+    values = []
+    for col in feature_cols:
+        values.append(
+            f"{_external_feature_label(col)} {float(first_future[col]):.1f}→{float(last_future[col]):.1f}"
+        )
     return (
         "直線: 最小二乗 / 重み: 直近重視 / "
-        f"外部: IIP {float(first_future['iip_avg']):.1f}→{float(last_future['iip_avg']):.1f}, "
-        f"CI {float(first_future['ci_avg']):.1f}→{float(last_future['ci_avg']):.1f}"
+        "外部: " + ", ".join(values)
     )
+
+
+def _available_external_feature_columns(*frames: pd.DataFrame) -> list[str]:
+    cols = []
+    for col in ("iip_avg", "ci_avg"):
+        if all(
+            frame is not None
+            and col in frame.columns
+            and pd.to_numeric(frame[col], errors="coerce").notna().any()
+            for frame in frames
+        ):
+            cols.append(col)
+    return cols
+
+
+def _external_feature_label(column: str) -> str:
+    return {"iip_avg": "IIP", "ci_avg": "CI"}.get(column, column)
+
+
+def _external_source_label(columns: Sequence[str]) -> str:
+    labels = [_external_feature_label(col) for col in columns]
+    if not labels:
+        return "外部指標なし"
+    return " / ".join(labels)

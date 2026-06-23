@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>顧客別納入分析システム</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <main class="main">
+        <section class="page">
+          <header class="app-header">
+            <div class="brand">
+              <img id="brandLogo" class="brand-logo" alt="新井精密" />
+              <div>
+                <h1 class="page-title">顧客別納入分析システム</h1>
+                <p class="page-subtitle">PostgreSQL の納入実績を検索し、年次予測と Excel 出力まで行います。</p>
+              </div>
+            </div>
+          </header>
+
+          <section class="card card-filter">
+            <div class="filter-row">
+              <label class="field field-date"><span>開始日</span><input id="dateFrom" type="date" /></label>
+              <label class="field field-date"><span>終了日</span><input id="dateTo" type="date" /></label>
+              <label class="field field-select"><span>集計単位</span><select id="aggregateMode"></select></label>
+              <label class="field field-wide">
+                <span>顧客</span>
+                <div class="combo">
+                  <input id="customerInput" placeholder="顧客名を入力" autocomplete="off" />
+                  <div id="customerDropdown" class="suggestion-list" role="listbox"></div>
+                </div>
+              </label>
+              <label class="field field-wide">
+                <span>品番</span>
+                <div class="combo">
+                  <input id="productInput" placeholder="品番を入力" autocomplete="off" />
+                  <div id="productDropdown" class="suggestion-list" role="listbox"></div>
+                </div>
+              </label>
+              <div class="filter-actions">
+                <button class="btn btn-primary" id="searchButton" type="button">
+                  <svg viewBox="0 0 24 24"><path d="m21 21-4.3-4.3M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15z" /></svg>
+                  検索
+                </button>
+                <button class="btn btn-secondary" id="exportActualButton" type="button">
+                  <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2" /></svg>
+                  Excel出力
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <div class="status-line" id="statusLine"></div>
+
+          <div class="content-grid">
+            <section class="card card-table">
+              <div class="card-head">
+                <div><h2>実績一覧</h2><p>検索条件で集計した納入実績です。</p></div>
+                <div class="button-row">
+                  <button class="btn btn-secondary" id="yearChartButton" type="button">
+                    <svg viewBox="0 0 24 24"><path d="M3 3v18h18M8 17V9M13 17V5M18 17v-6" /></svg>
+                    年別推移
+                  </button>
+                  <button class="btn btn-secondary" id="monthChartButton" type="button">
+                    <svg viewBox="0 0 24 24"><path d="M3 3v18h18M7 15l4-4 3 3 5-7" /></svg>
+                    月別推移
+                  </button>
+                </div>
+              </div>
+              <div class="table-scroll"><table id="actualTable"></table></div>
+            </section>
+
+            <section class="card card-table">
+              <div class="card-head">
+                <div><h2>年次予測</h2><p>検索結果を年ごとに集計し、3種類の予測を比較します。</p></div>
+              </div>
+              <div class="forecast-controls">
+                <label class="field field-forecast-years"><span>予測年数</span><input id="forecastYears" type="number" min="1" max="5" value="3" /></label>
+                <button class="btn btn-primary" id="forecastButton" type="button">
+                  <svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z" /></svg>
+                  予測を実行
+                </button>
+                <button class="btn btn-secondary" id="forecastChartButton" type="button">
+                  <svg viewBox="0 0 24 24"><path d="M3 3v18h18M7 15l4-4 3 3 5-7" /></svg>
+                  予測グラフ
+                </button>
+                <button class="btn btn-secondary" id="exportForecastButton" type="button">
+                  <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2" /></svg>
+                  予測Excel出力
+                </button>
+                <button class="btn btn-ghost" id="forecastDetailButton" type="button">
+                  <svg viewBox="0 0 24 24"><path d="M12 17h.01M12 13a4 4 0 1 0-4-4M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z" /></svg>
+                  詳細
+                </button>
+              </div>
+              <div class="note-box" id="forecastNote">
+                ・直線延長: 実績傾向から算出<br />
+                ・重み付き回帰: 直近年を重視して算出<br />
+                ・外部要因予測: IIP / CI を参考に算出
+              </div>
+              <div class="table-scroll forecast-table"><table id="forecastTable"></table></div>
+            </section>
+          </div>
+        </section>
+        <footer class="app-footer">© ARAISEIMITSU 2026 - Created By DIP Department</footer>
+      </main>
+    </div>
+
+    <dialog id="chartDialog" class="dialog dialog-chart">
+      <div class="dialog-head">
+        <h2 id="chartTitle">グラフ</h2>
+        <button class="icon-button" type="button" data-close-dialog="chartDialog" aria-label="閉じる" title="閉じる">
+          <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </div>
+      <img id="chartImage" alt="グラフ" />
+    </dialog>
+
+    <dialog id="detailDialog" class="dialog">
+      <div class="dialog-head">
+        <h2>予測算出の詳細</h2>
+        <button class="icon-button" type="button" data-close-dialog="detailDialog" aria-label="閉じる" title="閉じる">
+          <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        </button>
+      </div>
+      <div id="detailBody" class="detail-body"></div>
+    </dialog>
+    <script src="./app.js"></script>
+  </body>
+</html>
