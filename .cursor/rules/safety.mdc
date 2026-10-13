@@ -1,0 +1,8 @@
+---
+description: 機密情報と本番操作の制約
+alwaysApply: true
+---
+
+.env の実値・パスワード・接続文字列をログ、Docs、コミットへ出力しない。
+本番データ・設定変更、危険操作、外部送信は docs/RELEASE.md の Approval Gate に従う。
+ローカルテスト用のデータと本番データを混在させない。

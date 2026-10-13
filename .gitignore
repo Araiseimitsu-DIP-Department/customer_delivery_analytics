@@ -39,7 +39,7 @@ coverage.xml
 dmypy.json
 
 # IDE / editor
-.agents/
+# プロジェクト固有 Skills は共有する
 .idea/
 .vscode/
 *.iml

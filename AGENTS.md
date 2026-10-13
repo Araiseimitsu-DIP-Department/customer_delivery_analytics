@@ -84,3 +84,19 @@ README.md には以下を必ず記載する: セットアップ手順、実行�
 ユーザー承認なしで DB の破壊的操作を行うこと
 仕様変更を伴う自動リファクタリングを行うこと
 
+11. プロジェクト地図
+本プロジェクトの既存実装は app/ にある。一般構成規則を理由に移動しない。
+起動: app/main.py、画面 API: app/webview_app.py、UI: app/web/
+DB: app/db/postgres_connector.py、設定: app/config/settings.py
+業務: app/service/、保存: app/infrastructure/、配布: build_exe.ps1
+参照 Docs: docs/ARCHITECTURE.md、BUSINESS_RULES.md、DATABASE.md、API.md、RELEASE.md
+ハーネス調査・設計: docs/HARNESS.md、既存画面ガイド: docs/DESIGN/DESIGN.md
+常時制約: .cursor/rules/（本ファイルの既存規則も引き続き適用）
+作業手順: .agents/skills/development-workflow/SKILL.md
+実装後レビュー: .agents/skills/review-code/SKILL.md
+配布: .agents/skills/release/SKILL.md
+仕様非変更の整理: .agents/skills/code-simplifier/SKILL.md
+検証と承認の入口: docs/RELEASE.md。自動テストは tests/。
+データ更新変更時のみ .agents/skills/development-workflow/references/data-update-verification.md を参照する。
+再利用できる学びの提案と承認後の反映は同 references/learning-feedback.md に従う。
+

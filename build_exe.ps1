@@ -1,32 +1,29 @@
-# Customer Delivery Analytics - PyInstaller build script
+# PostgreSQL 運用向け PyInstaller ビルド
+param([string]$OutputDirectory = 'dist')
 
 $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
 Set-Location $Root
 
-foreach ($path in @(
-    (Join-Path $Root 'build'),
-    (Join-Path $Root 'dist')
-)) {
-    if (Test-Path -LiteralPath $path) {
-        Remove-Item -LiteralPath $path -Recurse -Force
-    }
-}
-
-$VenvPyInstaller = Join-Path $Root '.venv\Scripts\pyinstaller.exe'
-$PyInstallerPath = $null
-if (Test-Path -LiteralPath $VenvPyInstaller) {
-    $PyInstallerPath = $VenvPyInstaller
+$VenvPython = Join-Path $Root '.venv\Scripts\python.exe'
+if (Test-Path -LiteralPath $VenvPython) {
+    $PythonPath = $VenvPython
 } else {
-    $Command = Get-Command pyinstaller -ErrorAction SilentlyContinue
-    if ($Command) {
-        $PyInstallerPath = $Command.Source
-    }
+    $PythonPath = (Get-Command python -ErrorAction Stop).Source
 }
-if (-not $PyInstallerPath) {
-    Write-Error 'PyInstaller was not found. Run .\.venv\Scripts\python.exe -m pip install pyinstaller and retry.'
+& $PythonPath -m PyInstaller --version
+if ($LASTEXITCODE -ne 0) {
+    throw 'PyInstaller がありません。選択した Python 環境へ導入してください。'
 }
+$BuildDirectory = Join-Path $Root ('build\run-' + [guid]::NewGuid().ToString('N'))
+if (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory = Join-Path $Root $OutputDirectory
+}
+$OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
+$Verifier = Join-Path $Root 'scripts\verify_build.py'
+$AccessModules = @(& $PythonPath $Verifier --excluded-modules)
+if ($LASTEXITCODE -ne 0) { throw 'Access 依存の除外一覧を取得できませんでした。' }
 
 $ExeName = -join @(
     [char]0x9867,
@@ -49,8 +46,9 @@ $PyInstallerArgs = @(
     '--windowed',
     '--onefile',
     '--name', $ExeName,
-    '--specpath', (Join-Path $Root 'build\pyi_spec'),
-    '--workpath', (Join-Path $Root 'build\pyi_work'),
+    '--specpath', (Join-Path $BuildDirectory 'pyi_spec'),
+    '--workpath', (Join-Path $BuildDirectory 'pyi_work'),
+    '--distpath', $OutputDirectory,
     '--paths', $Root,
     '--hidden-import', 'app.webview_app',
     '--hidden-import', 'webview',
@@ -66,6 +64,10 @@ $PyInstallerArgs = @(
     '--clean'
 )
 
+foreach ($Module in $AccessModules) {
+    $PyInstallerArgs += @('--exclude-module', $Module)
+}
+
 if (Test-Path $IconIco) {
     $PyInstallerArgs += @('--icon', $IconIco)
 }
@@ -76,5 +78,9 @@ if (Test-Path $EnvFile) {
 
 $PyInstallerArgs += "$Root\app\main.py"
 
-& $PyInstallerPath @PyInstallerArgs
-Write-Host ('Done (onefile): dist\{0}.exe only - no extra files required beside the .exe.' -f $ExeName)
+& $PythonPath -m PyInstaller @PyInstallerArgs
+if ($LASTEXITCODE -ne 0) { throw 'PyInstaller ビルドに失敗しました。' }
+$Executable = Join-Path $OutputDirectory ($ExeName + '.exe')
+& $PythonPath $Verifier $Executable
+if ($LASTEXITCODE -ne 0) { throw 'ビルド成果物の同梱物検査に失敗しました。' }
+Write-Host ('ビルド・同梱物検査完了: {0}' -f $Executable)

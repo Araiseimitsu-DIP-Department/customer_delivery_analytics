@@ -51,6 +51,21 @@ pip install pyinstaller
 既定は `onefile` 配布です。生成されるのは単体の `.exe` です。
 ビルド時に `.env` が存在する場合は exe に同梱されます。exe と同じフォルダに `.env` を置いた場合は、同梱値より優先して読み込まれます。
 
+PostgreSQL 配布では `pyodbc` / `pypyodbc` / `win32com` を除外し、ビルド後に exe 内のモジュール・データ・DLL を検査します。GUI の .NET / WebView2、SQLite、PostgreSQL のバイナリは保持します。
+現行ツリーに Access 接続コードは存在しません。Access を再導入する場合は別途ソースと依存用途を確認してください。
+既存成果物を残して比較する場合は `.\build_exe.ps1 -OutputDirectory dist\postgres` を使用できます。詳細は [ビルド・検証仕様](docs/RELEASE.md)。
+
+## 開発時の検証
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q app scripts tests
+git diff --check
+```
+
+テストは本番 DB に接続せず、モックと一時ファイルで実施します。
+AI 開発の入口は AGENTS.md、調査・設計は [AIハーネス](docs/HARNESS.md) を参照してください。
+
 ## フォルダ構成
 
 ```text
